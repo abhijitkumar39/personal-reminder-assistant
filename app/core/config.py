@@ -14,9 +14,11 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Personal Reminder Assistant"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     debug: bool = False
     api_v1_prefix: str = "/api/v1"
+    database_url: str = f"sqlite:///{BASE_DIR / 'reminders.db'}"
+    scheduler_interval_seconds: int = 30
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 

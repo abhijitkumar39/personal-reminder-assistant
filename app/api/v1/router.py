@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import health, hello, messages
+from app.api.v1.endpoints import health, hello, messages, reminders
 
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(hello.router)
 api_router.include_router(messages.router)
+api_router.include_router(reminders.router)
