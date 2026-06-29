@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from app.services.recurrence import RecurrenceInterval
+from app.utils.datetime import to_utc, utc_now
 
 
 class ReminderStatus(str, Enum):
@@ -12,13 +13,9 @@ class ReminderStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-def _ensure_utc(value: datetime) -> datetime:
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-
 def _must_be_future(value: datetime) -> datetime:
-    remind_at = _ensure_utc(value)
-    if remind_at <= datetime.now(timezone.utc):
+    remind_at = to_utc(value)
+    if remind_at <= utc_now():
         raise ValueError("must be in the future")
     return remind_at
 
@@ -50,8 +47,8 @@ class ReminderCreate(BaseModel):
             return self
 
         if self.recurrence_end_at is not None:
-            end_at = _ensure_utc(self.recurrence_end_at)
-            remind_at = _ensure_utc(self.remind_at)
+            end_at = to_utc(self.recurrence_end_at)
+            remind_at = to_utc(self.remind_at)
             if end_at <= remind_at:
                 raise ValueError("recurrence_end_at must be after remind_at")
 
@@ -88,3 +85,9 @@ class ReminderResponse(BaseModel):
     sent_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("remind_at", "recurrence_end_at", "created_at", "sent_at")
+    def serialize_datetime(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return to_utc(value).isoformat().replace("+00:00", "Z")
