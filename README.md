@@ -1,6 +1,6 @@
 # Personal Reminder Assistant
 
-A personal reminder backend that stores reminders in a database and sends notifications to Telegram on schedule. Supports one-time and recurring reminders (hourly, daily, weekly).
+A personal reminder backend that stores reminders in a database and sends notifications to Telegram on schedule. Supports one-time and recurring reminders (hourly, daily, weekly). Also listens for inbound Telegram DMs (long polling) and replies with a simple hardcoded message.
 
 **Version:** 0.2.0
 
@@ -15,20 +15,31 @@ A personal reminder backend that stores reminders in a database and sends notifi
 5. [Configuration](#configuration)
 6. [Database](#database)
 7. [How reminders work](#how-reminders-work)
-8. [API reference](#api-reference)
-9. [Timezone guide](#timezone-guide)
-10. [Examples](#examples)
-11. [Troubleshooting](#troubleshooting)
+8. [Telegram inbound bot](#telegram-inbound-bot)
+9. [API reference](#api-reference)
+10. [Timezone guide](#timezone-guide)
+11. [Examples](#examples)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## What it does
 
+### Reminders (via REST API)
+
 1. You create a reminder via the REST API (title, time, optional recurrence).
 2. The reminder is saved in a SQLite database.
 3. A background scheduler runs inside the app and checks every 30 seconds for due reminders.
-4. When a reminder is due, the app sends a message to your Telegram channel/chat.
+4. When a reminder is due, the app sends a message to your Telegram channel/chat (`TELEGRAM_CHAT_ID`).
 5. One-time reminders are marked `sent`. Recurring reminders stay `pending` and reschedule to the next occurrence.
+
+### Inbound Telegram chat (current)
+
+1. A second background loop long-polls Telegram `getUpdates`.
+2. When you DM the bot any text, it replies with a hardcoded: **"How may I help you?"**
+3. Replies go to the **incoming chat** (`message.chat.id`), which may differ from the reminder channel ID.
+
+AI replies, bot commands, and creating reminders from chat are not built yet.
 
 ---
 
@@ -42,24 +53,28 @@ A personal reminder backend that stores reminders in a database and sends notifi
                               │  │ Endpoints  │───►│ Services         │  │
                               │  │ (API layer)│    │ - reminder       │  │
                               │  └────────────┘    │ - telegram       │  │
-                              │        │           │ - scheduler      │  │
-                              │        ▼           │ - recurrence     │  │
-                              │  ┌────────────┐    └────────┬─────────┘  │
-                              │  │ Schemas    │             │            │
-                              │  │ (validate) │             ▼            │
-                              │  └────────────┘    ┌──────────────────┐  │
+                              │        │           │ - telegram_bot   │  │
+                              │        ▼           │ - scheduler      │  │
+                              │  ┌────────────┐    │ - recurrence     │  │
+                              │  │ Schemas    │    └────────┬─────────┘  │
+                              │  │ (validate) │             │            │
+                              │  └────────────┘             ▼            │
+                              │                    ┌──────────────────┐  │
                               │                    │ SQLite (reminders│  │
                               │                    │ .db)             │  │
                               │                    └──────────────────┘  │
                               │                                          │
-                              │  Background loop (every 30s):            │
-                              │  scheduler → due reminders → Telegram  │
+                              │  Background loops (on startup):          │
+                              │  1) scheduler (every 30s)                │
+                              │     → due reminders → channel chat_id    │
+                              │  2) telegram_bot (long poll ~25s)        │
+                              │     → your DM → hardcoded reply          │
                               └──────────────────────────────────────────┘
                                                     │
                                                     ▼
                                          ┌──────────────────┐
                                          │  Telegram API    │
-                                         │  (your channel)  │
+                                         │  channel + DMs   │
                                          └──────────────────┘
 ```
 
@@ -67,10 +82,10 @@ A personal reminder backend that stores reminders in a database and sends notifi
 
 | Layer | Folder | Purpose |
 |-------|--------|---------|
-| **Entry point** | `app/main.py` | Creates the FastAPI app, starts DB + scheduler on boot |
+| **Entry point** | `app/main.py` | Creates the FastAPI app; starts DB, reminder scheduler, and Telegram bot loop on boot |
 | **API routes** | `app/api/v1/endpoints/` | HTTP handlers — receive requests, return JSON |
 | **Schemas** | `app/schemas/` | Request/response validation (Pydantic models) |
-| **Services** | `app/services/` | Business logic — DB operations, Telegram, scheduling |
+| **Services** | `app/services/` | Business logic — DB, Telegram send/poll, scheduling |
 | **Models** | `app/models/` | SQLAlchemy table definitions |
 | **Database** | `app/db/` | Engine, sessions, migrations |
 | **Config** | `app/core/config.py` | Settings loaded from `.env` |
@@ -87,7 +102,7 @@ personal-reminder-assistant/
 ├── .env                      # Your secrets (not in git)
 ├── reminders.db              # SQLite database (auto-created, not in git)
 └── app/
-    ├── main.py               # App entry point + lifespan (scheduler)
+    ├── main.py               # App entry point + lifespan (scheduler + bot)
     ├── core/
     │   └── config.py         # Settings from .env
     ├── api/
@@ -110,7 +125,8 @@ personal-reminder-assistant/
     │   ├── reminder.py       # Create, list, update, cancel reminders
     │   ├── scheduler.py      # Background loop that fires due reminders
     │   ├── recurrence.py     # Hourly/daily/weekly next-time logic
-    │   └── telegram.py       # Send messages via Telegram Bot API
+    │   ├── telegram.py       # Telegram Bot API client (send + getUpdates)
+    │   └── telegram_bot.py   # Inbound long-poll loop + hardcoded reply
     └── utils/
         └── datetime.py       # UTC conversion helpers
 ```
@@ -123,7 +139,8 @@ personal-reminder-assistant/
 
 - Python 3.10+ (3.11 recommended)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- A Telegram channel or chat ID (bot must be admin if using a channel)
+- A Telegram channel or chat ID for **reminder notifications** (bot must be admin if using a channel)
+- For inbound replies: open a **private chat** with your bot and press Start
 
 ### Install
 
@@ -147,6 +164,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - API docs (Swagger): http://localhost:8000/docs
 - Health check: http://localhost:8000/api/v1/health
+- DM your bot any text → should reply **How may I help you?**
 
 The database file (`reminders.db`) and tables are created automatically on first startup. No manual DB setup needed.
 
@@ -176,8 +194,8 @@ All settings go in `.env` (copy from `.env.example`):
 | `API_V1_PREFIX` | /api/v1 | API path prefix |
 | `DATABASE_URL` | sqlite:///./reminders.db | SQLite connection string |
 | `SCHEDULER_INTERVAL_SECONDS` | 30 | How often to check for due reminders |
-| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from BotFather |
-| `TELEGRAM_CHAT_ID` | *(required)* | Channel/chat ID (often starts with `-100`) |
+| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from BotFather (outbound reminders + inbound polling) |
+| `TELEGRAM_CHAT_ID` | *(required for reminders)* | Default channel/chat for scheduled notifications (often starts with `-100`). Inbound DM replies use the incoming `chat.id`, not this value. |
 
 ---
 
@@ -255,6 +273,56 @@ Every `SCHEDULER_INTERVAL_SECONDS` (default 30s):
 | `weekly` | +7 days from last `remind_at` |
 
 Example: `remind_at` at 12:40 PM with `hourly` → 12:40, 1:40, 2:40, ...
+
+---
+
+## Telegram inbound bot
+
+On startup (`app/main.py` lifespan), the app starts **two** background tasks:
+
+| Task | Module | Behavior |
+|------|--------|----------|
+| Reminder scheduler | `app/services/scheduler.py` | Every `SCHEDULER_INTERVAL_SECONDS` (default 30), send due reminders to `TELEGRAM_CHAT_ID` |
+| Inbound bot | `app/services/telegram_bot.py` | Long-poll `getUpdates` (timeout ~25s), reply to text DMs |
+
+### What is `chat_id`?
+
+A Telegram **conversation address**. The same bot can talk in different chats:
+
+- Private DM with you → a positive user/chat id  
+- Channel → often `-100...` (typical `TELEGRAM_CHAT_ID` for reminders)
+
+Scheduled reminders use the **fixed** `.env` chat id. Bot replies use the **incoming** `message.chat.id` from each update.
+
+### Long polling (not “every 30 seconds”)
+
+The bot does **not** sleep 30 seconds between checks. It calls Telegram `getUpdates` with `timeout=25`:
+
+1. The HTTP request stays open while Telegram waits for new messages.
+2. If you message during that window, Telegram returns immediately with the update.
+3. If nothing arrives within ~25s, Telegram returns HTTP 200 with an empty `result: []`, and the app polls again.
+
+`offset` (last `update_id + 1`) tells Telegram which updates were already processed so they are not replayed.
+
+On startup the bot also calls `deleteWebhook`, because an active webhook and `getUpdates` cannot both be used.
+
+### Current reply behavior
+
+Any inbound **text** message → hardcoded reply:
+
+```text
+How may I help you?
+```
+
+Non-text updates (stickers, etc.) are ignored. Webhooks and AI replies are future work.
+
+### How to test inbound chat
+
+1. Start the app with `uvicorn` (both loops start automatically).
+2. Open a private chat with your bot → Start.
+3. Send any text.
+4. Expect **How may I help you?**
+5. Confirm scheduled reminders still post to the channel as before.
 
 ---
 
@@ -569,8 +637,11 @@ pip install -r requirements.txt
 
 ## What's not built yet (future ideas)
 
-- Telegram bot commands (`/remind me in 1h`)
+- AI replies (LLM instead of the hardcoded message)
+- Telegram bot commands (`/list`, `/remind ...`)
+- Creating / cancelling reminders from chat
 - Natural language time parsing ("tomorrow at 9am")
+- Telegram webhooks (instead of long polling; needs public HTTPS)
 - API authentication
 - Web UI
 - Snooze as a dedicated endpoint
