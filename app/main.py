@@ -7,18 +7,22 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.session import init_db
 from app.services.scheduler import reminder_scheduler_loop
+from app.services.telegram_bot import telegram_bot_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     scheduler_task = asyncio.create_task(reminder_scheduler_loop())
+    bot_task = asyncio.create_task(telegram_bot_loop())
     yield
-    scheduler_task.cancel()
-    try:
-        await scheduler_task
-    except asyncio.CancelledError:
-        pass
+    for task in (scheduler_task, bot_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 
 
 def create_app() -> FastAPI:
