@@ -2,14 +2,31 @@ import asyncio
 import logging
 
 from app.core.config import settings
+from app.services.ai import AiError, OllamaService
 from app.services.telegram import TelegramError, TelegramService
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPLY = "How may I help you?"
+FALLBACK_REPLY = "Sorry, I couldn't think right now. Please try again in a moment."
+TYPING_REFRESH_SECONDS = 4
 
 
-async def handle_update(telegram: TelegramService, update: dict) -> None:
+async def _keep_typing(telegram: TelegramService, chat_id: str | int) -> None:
+    """Refresh Telegram's typing indicator until cancelled (action lasts ~5s)."""
+    while True:
+        try:
+            await telegram.send_chat_action(chat_id, "typing")
+        except TelegramError as exc:
+            logger.warning("Failed to send typing action: %s", exc)
+            return
+        await asyncio.sleep(TYPING_REFRESH_SECONDS)
+
+
+async def handle_update(
+    telegram: TelegramService,
+    ai: OllamaService,
+    update: dict,
+) -> None:
     message = update.get("message") or update.get("edited_message")
     if not isinstance(message, dict):
         return
@@ -20,12 +37,26 @@ async def handle_update(telegram: TelegramService, update: dict) -> None:
     if not text or chat_id is None:
         return
 
-    await telegram.send_message_to(chat_id, DEFAULT_REPLY)
+    typing_task = asyncio.create_task(_keep_typing(telegram, chat_id))
+    try:
+        try:
+            reply = await ai.generate_reply(text)
+        except AiError as exc:
+            logger.error("AI reply failed: %s", exc)
+            reply = FALLBACK_REPLY
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+
+    await telegram.send_message_to(chat_id, reply)
     logger.info("Replied to chat %s", chat_id)
 
 
 async def telegram_bot_loop() -> None:
-    """Long-poll Telegram and reply with a hardcoded message.
+    """Long-poll Telegram and reply using local Ollama.
 
     Reminder scheduling / API stay separate; this only listens for inbound chats.
     """
@@ -34,11 +65,15 @@ async def telegram_bot_loop() -> None:
         return
 
     telegram = TelegramService(settings)
+    ai = OllamaService(settings)
     offset: int | None = None
 
     try:
         await telegram.delete_webhook()
-        logger.info("Telegram inbound bot loop started")
+        logger.info(
+            "Telegram inbound bot loop started (Ollama model=%s)",
+            settings.ollama_model,
+        )
     except TelegramError as exc:
         logger.error("Failed to prepare Telegram bot loop: %s", exc)
         return
@@ -46,13 +81,12 @@ async def telegram_bot_loop() -> None:
     while True:
         try:
             updates = await telegram.get_updates(offset=offset, timeout_seconds=25)
-            print({"ok": True, "result": updates})
             for update in updates:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     offset = update_id + 1
                 try:
-                    await handle_update(telegram, update)
+                    await handle_update(telegram, ai, update)
                 except TelegramError as exc:
                     logger.error("Failed to handle Telegram update: %s", exc)
         except TelegramError as exc:

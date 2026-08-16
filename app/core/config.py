@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 30
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen3:4b"
 
 
 settings = Settings()

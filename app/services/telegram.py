@@ -76,6 +76,13 @@ class TelegramService:
             raise TelegramError("Telegram did not return a message ID", status_code=502)
         return message_id
 
+    async def send_chat_action(self, chat_id: str | int, action: str = "typing") -> None:
+        """Show a chat status like 'typing…' (expires after ~5 seconds on Telegram)."""
+        await self._post(
+            "sendChatAction",
+            {"chat_id": chat_id, "action": action},
+        )
+
     async def delete_webhook(self) -> None:
         """Ensure long polling works (webhook and getUpdates cannot both be active)."""
         await self._post("deleteWebhook", {"drop_pending_updates": False})

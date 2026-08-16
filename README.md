@@ -1,6 +1,6 @@
 # Personal Reminder Assistant
 
-A personal reminder backend that stores reminders in a database and sends notifications to Telegram on schedule. Supports one-time and recurring reminders (hourly, daily, weekly). Also listens for inbound Telegram DMs (long polling) and replies with a simple hardcoded message.
+A personal reminder backend that stores reminders in a database and sends notifications to Telegram on schedule. Supports one-time and recurring reminders (hourly, daily, weekly). Also listens for inbound Telegram DMs (long polling) and replies using a local Ollama LLM (`qwen3:4b` by default).
 
 **Version:** 0.2.0
 
@@ -33,13 +33,14 @@ A personal reminder backend that stores reminders in a database and sends notifi
 4. When a reminder is due, the app sends a message to your Telegram channel/chat (`TELEGRAM_CHAT_ID`).
 5. One-time reminders are marked `sent`. Recurring reminders stay `pending` and reschedule to the next occurrence.
 
-### Inbound Telegram chat (current)
+### Inbound Telegram chat (current — Step 1 AI)
 
 1. A second background loop long-polls Telegram `getUpdates`.
-2. When you DM the bot any text, it replies with a hardcoded: **"How may I help you?"**
+2. When you DM the bot any text, the app calls local **Ollama** (`OLLAMA_MODEL`, default `qwen3:4b`) and sends the model reply back.
 3. Replies go to the **incoming chat** (`message.chat.id`), which may differ from the reminder channel ID.
+4. If Ollama is down or fails, the bot sends a short fallback error message.
 
-AI replies, bot commands, and creating reminders from chat are not built yet.
+Bot commands, creating reminders from chat, and tool calling are not built yet.
 
 ---
 
@@ -68,7 +69,7 @@ AI replies, bot commands, and creating reminders from chat are not built yet.
                               │  1) scheduler (every 30s)                │
                               │     → due reminders → channel chat_id    │
                               │  2) telegram_bot (long poll ~25s)        │
-                              │     → your DM → hardcoded reply          │
+                              │     → your DM → Ollama → reply           │
                               └──────────────────────────────────────────┘
                                                     │
                                                     ▼
@@ -126,7 +127,8 @@ personal-reminder-assistant/
     │   ├── scheduler.py      # Background loop that fires due reminders
     │   ├── recurrence.py     # Hourly/daily/weekly next-time logic
     │   ├── telegram.py       # Telegram Bot API client (send + getUpdates)
-    │   └── telegram_bot.py   # Inbound long-poll loop + hardcoded reply
+    │   ├── telegram_bot.py   # Inbound long-poll loop + Ollama replies
+    │   └── ai.py             # Ollama chat client (generate_reply)
     └── utils/
         └── datetime.py       # UTC conversion helpers
 ```
@@ -140,6 +142,7 @@ personal-reminder-assistant/
 - Python 3.10+ (3.11 recommended)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - A Telegram channel or chat ID for **reminder notifications** (bot must be admin if using a channel)
+- For inbound AI replies: [Ollama](https://ollama.com) installed and running, with your model pulled (default `qwen3:4b`)
 - For inbound replies: open a **private chat** with your bot and press Start
 
 ### Install
@@ -164,7 +167,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - API docs (Swagger): http://localhost:8000/docs
 - Health check: http://localhost:8000/api/v1/health
-- DM your bot any text → should reply **How may I help you?**
+- DM your bot any text → should get an **Ollama** reply (keep Ollama running)
 
 The database file (`reminders.db`) and tables are created automatically on first startup. No manual DB setup needed.
 
@@ -196,6 +199,8 @@ All settings go in `.env` (copy from `.env.example`):
 | `SCHEDULER_INTERVAL_SECONDS` | 30 | How often to check for due reminders |
 | `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from BotFather (outbound reminders + inbound polling) |
 | `TELEGRAM_CHAT_ID` | *(required for reminders)* | Default channel/chat for scheduled notifications (often starts with `-100`). Inbound DM replies use the incoming `chat.id`, not this value. |
+| `OLLAMA_BASE_URL` | http://localhost:11434 | Local Ollama server URL |
+| `OLLAMA_MODEL` | qwen3:4b | Model name used for inbound Telegram replies |
 
 ---
 
@@ -283,7 +288,7 @@ On startup (`app/main.py` lifespan), the app starts **two** background tasks:
 | Task | Module | Behavior |
 |------|--------|----------|
 | Reminder scheduler | `app/services/scheduler.py` | Every `SCHEDULER_INTERVAL_SECONDS` (default 30), send due reminders to `TELEGRAM_CHAT_ID` |
-| Inbound bot | `app/services/telegram_bot.py` | Long-poll `getUpdates` (timeout ~25s), reply to text DMs |
+| Inbound bot | `app/services/telegram_bot.py` | Long-poll `getUpdates` (timeout ~25s), reply to text DMs via Ollama |
 
 ### What is `chat_id`?
 
@@ -308,21 +313,22 @@ On startup the bot also calls `deleteWebhook`, because an active webhook and `ge
 
 ### Current reply behavior
 
-Any inbound **text** message → hardcoded reply:
+Any inbound **text** message → `app/services/ai.py` → Ollama `/api/chat` → reply with `message.content`.
 
-```text
-How may I help you?
-```
+Requirements:
+- Ollama must be running (`ollama serve` / app running in background)
+- Model must be available locally (`ollama pull qwen3:4b`)
 
-Non-text updates (stickers, etc.) are ignored. Webhooks and AI replies are future work.
+Non-text updates (stickers, etc.) are ignored. Webhooks and tool calling are future work.
 
 ### How to test inbound chat
 
-1. Start the app with `uvicorn` (both loops start automatically).
-2. Open a private chat with your bot → Start.
-3. Send any text.
-4. Expect **How may I help you?**
-5. Confirm scheduled reminders still post to the channel as before.
+1. Ensure Ollama is up: `curl http://localhost:11434/api/tags`
+2. Start the app with `uvicorn` (both loops start automatically).
+3. Open a private chat with your bot → Start.
+4. Send any text (e.g. `hi`).
+5. Expect a short model-generated reply (may take a few seconds on CPU).
+6. Confirm scheduled reminders still post to the channel as before.
 
 ---
 
@@ -637,9 +643,10 @@ pip install -r requirements.txt
 
 ## What's not built yet (future ideas)
 
-- AI replies (LLM instead of the hardcoded message)
+- Intent classification / structured JSON (Step 2)
+- Creating / cancelling reminders from chat (Steps 3–4)
 - Telegram bot commands (`/list`, `/remind ...`)
-- Creating / cancelling reminders from chat
+- Multi-turn memory (Step 5)
 - Natural language time parsing ("tomorrow at 9am")
 - Telegram webhooks (instead of long polling; needs public HTTPS)
 - API authentication
